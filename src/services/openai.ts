@@ -45,6 +45,113 @@ async function dataUrlToImageFile(imageDataUrl: string): Promise<File> {
   return new File([blob], `floor-plan.${extension}`, { type: blob.type || 'image/png' });
 }
 
+async function loadImage(imageDataUrl: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('Failed to read uploaded floor plan image'));
+    img.src = imageDataUrl;
+  });
+}
+
+async function generateDeterministicIsometricFromPlan(imageDataUrl: string): Promise<string> {
+  const img = await loadImage(imageDataUrl);
+
+  const skewX = -0.58;
+  const scaleY = 0.68;
+  const depth = 28;
+  const pad = 40;
+
+  const projectedWidth = img.width + Math.abs(skewX) * img.height;
+  const projectedHeight = img.height * scaleY;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.ceil(projectedWidth + pad * 2 + depth * 2);
+  canvas.height = Math.ceil(projectedHeight + pad * 2 + depth * 2);
+  const ctx = canvas.getContext('2d');
+
+  if (!ctx) {
+    throw new Error('Canvas context not available');
+  }
+
+  ctx.fillStyle = '#f3f4f6';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // Draw subtle extrusion layers so the floor plan appears as a 3D isometric slab.
+  for (let offset = depth; offset >= 1; offset -= 1) {
+    ctx.save();
+    ctx.translate(pad + Math.abs(skewX) * img.height + offset, pad + offset);
+    ctx.transform(1, 0, skewX, scaleY, 0, 0);
+    ctx.globalAlpha = 0.02;
+    ctx.drawImage(img, 0, 0, img.width, img.height);
+    ctx.restore();
+  }
+
+  ctx.save();
+  ctx.translate(pad + Math.abs(skewX) * img.height, pad);
+  ctx.transform(1, 0, skewX, scaleY, 0, 0);
+  ctx.globalAlpha = 1;
+  ctx.drawImage(img, 0, 0, img.width, img.height);
+  ctx.restore();
+
+  return canvas.toDataURL('image/png');
+}
+
+async function lockStructureOnStyledIsometric(
+  baseIsometricDataUrl: string,
+  styledIsometricDataUrl: string
+): Promise<string> {
+  const [baseImg, styledImg] = await Promise.all([
+    loadImage(baseIsometricDataUrl),
+    loadImage(styledIsometricDataUrl),
+  ]);
+
+  const canvas = document.createElement('canvas');
+  canvas.width = baseImg.width;
+  canvas.height = baseImg.height;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    throw new Error('Canvas context not available');
+  }
+
+  ctx.drawImage(styledImg, 0, 0, canvas.width, canvas.height);
+
+  const maskCanvas = document.createElement('canvas');
+  maskCanvas.width = baseImg.width;
+  maskCanvas.height = baseImg.height;
+  const maskCtx = maskCanvas.getContext('2d');
+  if (!maskCtx) {
+    throw new Error('Mask canvas context not available');
+  }
+
+  maskCtx.drawImage(baseImg, 0, 0, maskCanvas.width, maskCanvas.height);
+  const imageData = maskCtx.getImageData(0, 0, maskCanvas.width, maskCanvas.height);
+  const data = imageData.data;
+
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+    const a = data[i + 3];
+    const luminance = (r * 299 + g * 587 + b * 114) / 1000;
+    const isStructurePixel = a > 20 && luminance < 120;
+
+    if (isStructurePixel) {
+      data[i] = 35;
+      data[i + 1] = 35;
+      data[i + 2] = 35;
+      data[i + 3] = 165;
+    } else {
+      data[i + 3] = 0;
+    }
+  }
+
+  maskCtx.putImageData(imageData, 0, 0);
+  ctx.drawImage(maskCanvas, 0, 0);
+
+  return canvas.toDataURL('image/png');
+}
+
 async function generateImageFromFloorPlan(
   imageDataUrl: string,
   prompt: string
@@ -92,6 +199,8 @@ interface FaithfulnessResult {
   isFaithful: boolean;
   score: number;
   reason: string;
+  sourceRoomCount: number;
+  generatedRoomCount: number;
 }
 
 async function evaluateLayoutFaithfulness(
@@ -131,6 +240,8 @@ Return JSON with:
 - is_faithful (boolean): true only if room structure, shape, boundaries, and adjacency are preserved
 - score (0-100): geometric faithfulness score
 - reason (string): short reason
+- source_room_count (number): count enclosed rooms in source plan
+- generated_room_count (number): count enclosed rooms in generated render
 
 Fail if rooms are added/removed, room shape changes significantly, or adjacency changes.`,
               },
@@ -162,12 +273,16 @@ Fail if rooms are added/removed, room shape changes significantly, or adjacency 
     is_faithful?: boolean;
     score?: number;
     reason?: string;
+    source_room_count?: number;
+    generated_room_count?: number;
   };
 
   return {
     isFaithful: Boolean(parsed.is_faithful),
     score: parsed.score ?? 0,
     reason: parsed.reason || 'No reason provided by validator.',
+    sourceRoomCount: parsed.source_room_count ?? 0,
+    generatedRoomCount: parsed.generated_room_count ?? 0,
   };
 }
 
@@ -243,61 +358,57 @@ export async function analyzeFloorPlan(imageDataUrl: string): Promise<string[]> 
 }
 
 export async function generateIsometricView(params: GenerateIsometricParams): Promise<string> {
-  if (!OPENAI_API_KEY) {
-    throw new Error('OpenAI API key is not configured');
-  }
-
-  const prompt = `Convert the uploaded 2D floor plan into a single 3D isometric dollhouse-style render for "${params.projectName}".
-
-Hard constraints (must follow):
-- Use only the exact room boundaries, wall positions, and openings visible in the uploaded plan.
-- Keep room count and adjacency exactly as shown.
-- Do NOT add or remove rooms, corridors, stairs, doors, windows, or structural elements.
-- Do NOT hallucinate unseen areas. If unclear, leave the area simple and neutral instead of inventing details.
-- Preserve overall proportions and circulation path from the source plan.
-- Keep room geometry and wall lines equivalent to the source; only extrude to 3D.
-
-Rendering style:
-- Orthographic isometric angle (about 45 degrees), professional architectural visualization.
-- Realistic but restrained materials and lighting.
-- Keep the final image faithful to the plan first, aesthetics second.`;
-
   try {
+    const baseIsometric = await generateDeterministicIsometricFromPlan(params.imageDataUrl);
+
+    // If key is unavailable, return deterministic geometry-preserving isometric directly.
+    if (!OPENAI_API_KEY) {
+      return baseIsometric;
+    }
+
+    const stylePrompt = `Convert this isometric floor-plan image into a polished architectural 3D render for "${params.projectName}".
+
+Hard constraints (must follow exactly):
+- Do not move, reshape, add, or remove any walls, rooms, door openings, window openings, corridors, or stairs.
+- Keep room count and room adjacency exactly the same.
+- Keep the same camera angle and composition.
+- Preserve all structural geometry exactly; only enhance visual style.
+
+Styling goals:
+- Clean white wall finishes, realistic flooring materials, subtle shadows, and soft global lighting.
+- Add plausible doors/windows/fixtures only where existing openings already exist.
+- Professional real-estate isometric render quality similar to premium architectural brochures.`;
+
     const maxAttempts = 2;
-    let bestResult: { imageUrl: string; score: number; reason: string } | null = null;
+    let bestStyled: { imageUrl: string; score: number } | null = null;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       const attemptPrompt =
         attempt === 1
-          ? prompt
-          : `${prompt}
+          ? stylePrompt
+          : `${stylePrompt}
 
-Retry pass: Preserve the exact room polygons, relative wall lengths, and opening positions from the source. Reduce decoration and prioritize geometric accuracy.`;
+Retry instruction: prioritize structural lock. Keep every wall segment and opening in identical position to input. Reduce decorative changes if needed.`;
 
-      const generatedImage = await generateImageFromFloorPlan(params.imageDataUrl, attemptPrompt);
-      const validation = await evaluateLayoutFaithfulness(
-        params.imageDataUrl,
-        generatedImage,
-        'isometric'
-      );
+      const styledImage = await generateImageFromFloorPlan(baseIsometric, attemptPrompt);
+      const validation = await evaluateLayoutFaithfulness(baseIsometric, styledImage, 'isometric');
 
-      if (!bestResult || validation.score > bestResult.score) {
-        bestResult = {
-          imageUrl: generatedImage,
-          score: validation.score,
-          reason: validation.reason,
-        };
+      if (!bestStyled || validation.score > bestStyled.score) {
+        bestStyled = { imageUrl: styledImage, score: validation.score };
       }
 
-      // Accept if strong faithfulness. 70+ is often practically accurate for image models.
-      if (validation.isFaithful && validation.score >= 70) {
-        return generatedImage;
+      const roomCountMatches =
+        validation.sourceRoomCount > 0 &&
+        validation.generatedRoomCount > 0 &&
+        validation.sourceRoomCount === validation.generatedRoomCount;
+
+      if (validation.isFaithful && validation.score >= 82 && roomCountMatches) {
+        return await lockStructureOnStyledIsometric(baseIsometric, styledImage);
       }
     }
 
-    throw new Error(
-      `Layout mismatch detected (${bestResult?.score ?? 0}/100). ${bestResult?.reason || 'Generated image is not faithful to the uploaded plan.'}`
-    );
+    // If strict pass is not achieved, always return exact-structure deterministic output.
+    return baseIsometric;
   } catch (error) {
     console.error('Error generating isometric view:', error);
     throw error;
