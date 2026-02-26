@@ -71,17 +71,19 @@ export function RenderResults({ renders, projectName, floorPlan, onDownload }: R
           <Grid3x3 className="w-5 h-5" />
           <span>3D Isometric View</span>
         </button>
-        <button
-          onClick={() => setSelectedView('rooms')}
-          className={`flex items-center space-x-2 px-6 py-3 font-medium transition-all ${
-            selectedView === 'rooms'
-              ? 'text-blue-600 border-b-2 border-blue-600'
-              : 'text-gray-600 hover:text-gray-900'
-          }`}
-        >
-          <Home className="w-5 h-5" />
-          <span>Room-Wise Renders ({roomRenders.length})</span>
-        </button>
+        {roomRenders.length > 0 && (
+          <button
+            onClick={() => setSelectedView('rooms')}
+            className={`flex items-center space-x-2 px-6 py-3 font-medium transition-all ${
+              selectedView === 'rooms'
+                ? 'text-blue-600 border-b-2 border-blue-600'
+                : 'text-gray-600 hover:text-gray-900'
+            }`}
+          >
+            <Home className="w-5 h-5" />
+            <span>Room-Wise Renders ({roomRenders.length})</span>
+          </button>
+        )}
       </div>
 
       {selectedView === 'floorplan' && (

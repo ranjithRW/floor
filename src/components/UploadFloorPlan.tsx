@@ -68,7 +68,7 @@ export function UploadFloorPlan({ onUpload, isProcessing }: UploadFloorPlanProps
           Upload Your 2D Floor Plan
         </h2>
         <p className="text-gray-600">
-          Transform your floor plan into stunning 3D visualizations
+          Get isometric and room-wise 3D renders that stay faithful to your uploaded layout
         </p>
       </div>
 
@@ -167,7 +167,7 @@ export function UploadFloorPlan({ onUpload, isProcessing }: UploadFloorPlanProps
               Processing...
             </span>
           ) : (
-            'Generate 3D Visualizations'
+            'Generate Isometric 3D View'
           )}
         </button>
       </form>

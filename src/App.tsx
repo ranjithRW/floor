@@ -4,9 +4,7 @@ import { supabase, type Project, type FloorPlan, type Render } from './lib/supab
 import { UploadFloorPlan } from './components/UploadFloorPlan';
 import { RenderResults } from './components/RenderResults';
 import {
-  analyzeFloorPlan,
   generateIsometricView,
-  generateRoomRender,
 } from './services/openai';
 
 interface ProjectWithDetails extends Project {
@@ -85,9 +83,7 @@ function App() {
       const reader = new FileReader();
       reader.onloadend = async () => {
         try {
-          const base64String = (reader.result as string).split(',')[1];
-
-          const imageUrl = reader.result as string;
+          const imageDataUrl = reader.result as string;
 
           setStatusMessage('Saving floor plan...');
 
@@ -96,7 +92,7 @@ function App() {
             .insert({
               project_id: project.id,
               original_filename: file.name,
-              file_url: imageUrl,
+              file_url: imageDataUrl,
               file_size: file.size,
             })
             .select()
@@ -104,13 +100,9 @@ function App() {
 
           if (floorPlanError) throw floorPlanError;
 
-          setStatusMessage('Analyzing floor plan with AI...');
+          setStatusMessage('Generating strict layout-faithful 3D isometric view...');
 
-          const rooms = await analyzeFloorPlan(base64String);
-
-          setStatusMessage('Generating 3D isometric view...');
-
-          const isometricPrompt = `3D isometric architectural visualization of ${projectName}`;
+          const isometricPrompt = `Image-to-image strict isometric render based on uploaded 2D floor plan for ${projectName}`;
           const { data: isometricRender, error: isometricError } = await supabase
             .from('renders')
             .insert({
@@ -124,94 +116,37 @@ function App() {
 
           if (isometricError) throw isometricError;
 
-          setStatusMessage(`Generating ${rooms.length} room renders...`);
-
-          const roomRenderPromises = rooms.map((room) =>
-            supabase
-              .from('renders')
-              .insert({
-                floor_plan_id: floorPlan.id,
-                render_type: 'room_wise',
-                room_name: room,
-                prompt_used: `3D interior render of ${room}`,
-                status: 'processing',
-              })
-              .select()
-              .single()
-          );
-
-          const roomRenderResults = await Promise.all(roomRenderPromises);
-
           const projectWithDetails: ProjectWithDetails = {
             ...project,
             floorPlan,
-            renders: [
-              isometricRender,
-              ...roomRenderResults.map((r) => r.data).filter(Boolean),
-            ] as Render[],
+            renders: [isometricRender] as Render[],
           };
 
           setCurrentProject(projectWithDetails);
           setView('results');
 
-          generateIsometricView({ imageBase64: base64String, projectName })
-            .then(async (imageUrl) => {
-              await supabase
-                .from('renders')
-                .update({
-                  image_url: imageUrl,
-                  status: 'completed',
-                  completed_at: new Date().toISOString(),
-                })
-                .eq('id', isometricRender.id);
-
-              loadCurrentProject(project.id);
-            })
-            .catch(async (error) => {
-              console.error('Error generating isometric view:', error);
-              await supabase
-                .from('renders')
-                .update({
-                  status: 'failed',
-                  error_message: error.message,
-                })
-                .eq('id', isometricRender.id);
-
-              loadCurrentProject(project.id);
-            });
-
-          roomRenderResults.forEach((result, index) => {
-            if (result.data) {
-              generateRoomRender({
-                imageBase64: base64String,
-                roomName: rooms[index],
+          try {
+            const imageUrl = await generateIsometricView({ imageDataUrl, projectName });
+            await supabase
+              .from('renders')
+              .update({
+                image_url: imageUrl,
+                status: 'completed',
+                completed_at: new Date().toISOString(),
               })
-                .then(async (imageUrl) => {
-                  await supabase
-                    .from('renders')
-                    .update({
-                      image_url: imageUrl,
-                      status: 'completed',
-                      completed_at: new Date().toISOString(),
-                    })
-                    .eq('id', result.data.id);
+              .eq('id', isometricRender.id);
+          } catch (error) {
+            console.error('Error generating isometric view:', error);
+            await supabase
+              .from('renders')
+              .update({
+                status: 'failed',
+                error_message: (error as Error).message,
+              })
+              .eq('id', isometricRender.id);
+          }
 
-                  loadCurrentProject(project.id);
-                })
-                .catch(async (error) => {
-                  console.error('Error generating room render:', error);
-                  await supabase
-                    .from('renders')
-                    .update({
-                      status: 'failed',
-                      error_message: error.message,
-                    })
-                    .eq('id', result.data.id);
-
-                  loadCurrentProject(project.id);
-                });
-            }
-          });
+          await loadCurrentProject(project.id);
 
           setStatusMessage('');
           setIsProcessing(false);
