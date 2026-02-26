@@ -114,40 +114,8 @@ async function lockStructureOnStyledIsometric(
     throw new Error('Canvas context not available');
   }
 
+  // Keep the styled 3D render clean (no structural line overlay), while preserving output dimensions.
   ctx.drawImage(styledImg, 0, 0, canvas.width, canvas.height);
-
-  const maskCanvas = document.createElement('canvas');
-  maskCanvas.width = baseImg.width;
-  maskCanvas.height = baseImg.height;
-  const maskCtx = maskCanvas.getContext('2d');
-  if (!maskCtx) {
-    throw new Error('Mask canvas context not available');
-  }
-
-  maskCtx.drawImage(baseImg, 0, 0, maskCanvas.width, maskCanvas.height);
-  const imageData = maskCtx.getImageData(0, 0, maskCanvas.width, maskCanvas.height);
-  const data = imageData.data;
-
-  for (let i = 0; i < data.length; i += 4) {
-    const r = data[i];
-    const g = data[i + 1];
-    const b = data[i + 2];
-    const a = data[i + 3];
-    const luminance = (r * 299 + g * 587 + b * 114) / 1000;
-    const isStructurePixel = a > 20 && luminance < 120;
-
-    if (isStructurePixel) {
-      data[i] = 35;
-      data[i + 1] = 35;
-      data[i + 2] = 35;
-      data[i + 3] = 165;
-    } else {
-      data[i + 3] = 0;
-    }
-  }
-
-  maskCtx.putImageData(imageData, 0, 0);
-  ctx.drawImage(maskCanvas, 0, 0);
 
   return canvas.toDataURL('image/png');
 }
@@ -373,13 +341,16 @@ Hard constraints (must follow exactly):
 - Keep room count and room adjacency exactly the same.
 - Keep the same camera angle and composition.
 - Preserve all structural geometry exactly; only enhance visual style.
+- Every enclosed room and every internal partition visible in the input must remain visible in the output.
+- Do not merge rooms, hide small rooms, simplify partitions, or replace areas with empty floor.
+- Do not add technical line-art overlays, blueprint outlines, or dark/gray wall tracing over the final render.
 
 Styling goals:
 - Clean white wall finishes, realistic flooring materials, subtle shadows, and soft global lighting.
 - Add plausible doors/windows/fixtures only where existing openings already exist.
 - Professional real-estate isometric render quality similar to premium architectural brochures.`;
 
-    const maxAttempts = 2;
+    const maxAttempts = 4;
     let bestStyled: { imageUrl: string; score: number } | null = null;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -388,7 +359,7 @@ Styling goals:
           ? stylePrompt
           : `${stylePrompt}
 
-Retry instruction: prioritize structural lock. Keep every wall segment and opening in identical position to input. Reduce decorative changes if needed.`;
+Retry instruction: prioritize layout completeness over styling. Keep every room boundary and partition from the input visible and unchanged. If any area is ambiguous, preserve it exactly instead of simplifying or removing it.`;
 
       const styledImage = await generateImageFromFloorPlan(baseIsometric, attemptPrompt);
       const validation = await evaluateLayoutFaithfulness(baseIsometric, styledImage, 'isometric');
@@ -402,7 +373,7 @@ Retry instruction: prioritize structural lock. Keep every wall segment and openi
         validation.generatedRoomCount > 0 &&
         validation.sourceRoomCount === validation.generatedRoomCount;
 
-      if (validation.isFaithful && validation.score >= 82 && roomCountMatches) {
+      if (validation.isFaithful && validation.score >= 90 && roomCountMatches) {
         return await lockStructureOnStyledIsometric(baseIsometric, styledImage);
       }
     }
